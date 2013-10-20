@@ -19,8 +19,8 @@
 
 package org.kiji.express.flow.framework
 
+import java.net.URI
 import java.util.UUID
-
 import cascading.flow.FlowProcess
 import cascading.flow.hadoop.HadoopFlowProcess
 import cascading.scheme.Scheme
@@ -30,13 +30,18 @@ import cascading.tap.hadoop.io.HadoopTupleEntrySchemeIterator
 import cascading.tuple.TupleEntryCollector
 import cascading.tuple.TupleEntryIterator
 import com.google.common.base.Objects
-
+import com.twitter.elephantbird.mapred.output.DeprecatedOutputFormatWrapper
+import com.twitter.maple.hbase.HBaseTapCollector
 import org.apache.hadoop.conf.Configuration
+import org.apache.hadoop.fs.FileSystem
+import org.apache.hadoop.fs.Path
+import org.apache.hadoop.io.NullWritable
+import org.apache.hadoop.io.Text
+import org.apache.hadoop.mapred.FileOutputFormat
 import org.apache.hadoop.mapred.JobConf
 import org.apache.hadoop.mapred.OutputCollector
 import org.apache.hadoop.mapred.RecordReader
 import org.apache.hadoop.mapred.lib.NullOutputFormat
-
 import org.kiji.annotations.ApiAudience
 import org.kiji.annotations.ApiStability
 import org.kiji.express.flow._
@@ -50,6 +55,7 @@ import org.kiji.schema.avro.AvroValidationPolicy
 import org.kiji.schema.impl.Versions
 import org.kiji.schema.layout.KijiTableLayout
 import org.kiji.schema.util.ProtocolVersion
+import org.kiji.express.mapreduce.output.DirectKijiTableOutputFormat
 
 /**
  * A Kiji-specific implementation of a Cascading `Tap`, which defines the location of a Kiji table.
@@ -67,15 +73,15 @@ import org.kiji.schema.util.ProtocolVersion
 @ApiAudience.Framework
 @ApiStability.Experimental
 private[express] class KijiTap(
-    // This is not a val because KijiTap needs to be serializable and KijiURI is not.
-    uri: KijiURI,
-    private val scheme: KijiScheme)
+  uri: KijiURI,
+  private val scheme: KijiScheme)
     extends Tap[JobConf, RecordReader[KijiKey, KijiValue], OutputCollector[_, _]](
-        scheme.asInstanceOf[Scheme[JobConf, RecordReader[KijiKey, KijiValue],
-            OutputCollector[_, _], _, _]]) {
+      scheme.asInstanceOf[Scheme[JobConf, RecordReader[KijiKey, KijiValue], OutputCollector[_, _], _, _]]) {
 
-  /** Address of the table to read from or write to. */
   private val tableUri: String = uri.toString()
+
+  @transient
+  private lazy val BOGUS_DIR = "_bogus"
 
   /** Unique identifier for this KijiTap instance. */
   private val id: String = UUID.randomUUID().toString()
@@ -107,9 +113,10 @@ private[express] class KijiTap(
    * @param conf to which we will add the table uri.
    */
   override def sinkConfInit(flow: FlowProcess[JobConf], conf: JobConf) {
-    // TODO(CHOP-35): Use an output format that writes to HFiles.
-    // Configure the job's output format.
-    conf.setOutputFormat(classOf[NullOutputFormat[_, _]])
+
+    // Set the output format to kiji
+    DeprecatedOutputFormatWrapper.setOutputFormat(classOf[DirectKijiTableOutputFormat], conf)
+    FileOutputFormat.setOutputPath(conf, new Path(BOGUS_DIR));
 
     // Store the output table.
     conf.set(KijiConfKeys.KIJI_OUTPUT_TABLE_URI, tableUri)
@@ -134,11 +141,11 @@ private[express] class KijiTap(
    * @return an iterator that reads rows from the desired Kiji table.
    */
   override def openForRead(
-      flow: FlowProcess[JobConf],
-      recordReader: RecordReader[KijiKey, KijiValue]): TupleEntryIterator = {
+    flow: FlowProcess[JobConf],
+    recordReader: RecordReader[KijiKey, KijiValue]): TupleEntryIterator = {
     // scalastyle:off null
     val modifiedFlow = if (flow.getStringProperty(KijiConfKeys.KIJI_INPUT_TABLE_URI) == null) {
-    // scalastyle:on null
+      // scalastyle:on null
       // TODO CHOP-71 Remove this hack which is introduced by a scalding bug:
       // https://github.com/twitter/scalding/issues/369
       // This hack is only required for testing (HadoopTest Mode)
@@ -150,28 +157,26 @@ private[express] class KijiTap(
       flow
     }
     new HadoopTupleEntrySchemeIterator(
-        modifiedFlow,
-        this.asInstanceOf[Tap[JobConf, RecordReader[_, _], OutputCollector[_, _]]],
-        recordReader)
+      modifiedFlow,
+      this.asInstanceOf[Tap[JobConf, RecordReader[_, _], OutputCollector[_, _]]],
+      recordReader)
   }
 
   /**
    * Opens any resources required to write from a Kiji table.
    *
    * @param flow being run.
-   * @param outputCollector that will write to the desired Kiji table. Note: This is ignored
-   *     currently since writing to a Kiji table is currently implemented without using an output
-   *     format by writing to the table directly from
-   *     [[org.kiji.express.flow.framework.KijiScheme]].
+   * @param outputCollector that will write to the desired Kiji table.
    * @return a collector that writes tuples to the desired Kiji table.
    */
   override def openForWrite(
-      flow: FlowProcess[JobConf],
-      outputCollector: OutputCollector[_, _]): TupleEntryCollector = {
+    flow: FlowProcess[JobConf],
+    outputCollector: OutputCollector[_, _]): TupleEntryCollector = {
+
     new HadoopTupleEntrySchemeCollector(
-        flow,
-        this.asInstanceOf[Tap[JobConf, RecordReader[_, _], OutputCollector[_, _]]],
-        outputCollector)
+      flow,
+      this.asInstanceOf[Tap[JobConf, RecordReader[_, _], OutputCollector[_, _]]],
+      outputCollector)
   }
 
   /**
@@ -201,6 +206,14 @@ private[express] class KijiTap(
   }
 
   /**
+   * Performs cleanup operations after the write has completed.
+   */
+  override def commitResource(conf: JobConf) = {
+    val fs = FileSystem.get(conf)
+    fs.delete(new Path(BOGUS_DIR), true)
+  }
+
+  /**
    * Determines if the Kiji table this `Tap` instance points to exists.
    *
    * @param conf containing settings for this flow.
@@ -227,7 +240,7 @@ private[express] class KijiTap(
   override def equals(other: Any): Boolean = {
     other match {
       case tap: KijiTap => (tableUri == tap.tableUri) && (scheme == tap.scheme) && (id == tap.id)
-      case _ => false
+      case _            => false
     }
   }
 
@@ -259,25 +272,25 @@ object KijiTap {
       conf: Configuration) {
     // Try to open the Kiji instance.
     val kiji: Kiji =
-        try {
-          Kiji.Factory.open(kijiUri, conf)
-        } catch {
-          case e: Exception =>
-            throw new InvalidKijiTapException(
-                "Error opening Kiji instance: %s\n".format(kijiUri.getInstance()) + e.getMessage)
-        }
+      try {
+        Kiji.Factory.open(kijiUri, conf)
+      } catch {
+        case e: Exception =>
+          throw new InvalidKijiTapException(
+            "Error opening Kiji instance: %s\n".format(kijiUri.getInstance()) + e.getMessage)
+      }
 
     // Try to open the table.
     val table: KijiTable =
-        try {
-          kiji.openTable(kijiUri.getTable())
-        } catch {
-          case e: Exception =>
-            throw new InvalidKijiTapException(
-                "Error opening Kiji table: %s\n".format(kijiUri.getTable()) + e.getMessage)
-        } finally {
-          kiji.release() // Release the Kiji instance.
-        }
+      try {
+        kiji.openTable(kijiUri.getTable())
+      } catch {
+        case e: Exception =>
+          throw new InvalidKijiTapException(
+            "Error opening Kiji table: %s\n".format(kijiUri.getTable()) + e.getMessage)
+      } finally {
+        kiji.release() // Release the Kiji instance.
+      }
 
     // Check the columns are valid
     val tableLayout: KijiTableLayout = table.getLayout
@@ -295,7 +308,14 @@ object KijiTap {
         // Filter for columns that don't exist
         .filter( { case colname => !tableLayout.exists(colname) } )
 
-    // Make sure the writer schema is okay
+    /**
+     * Generates Some(errorMessage) containing an error message if there are any errors in a
+     * ColumnRequest, and None if there are no errors.
+     *
+     * @param columnName of the column to validate.
+     * @param options of the column to validate.
+     * @return None if there are no errors, and Some(errorMessage) if there are.
+     */
     def getSchemaValidationErrors(col: ColumnRequestOutput): Option[String] = {
       val schemaValidationError =
         "Writer schema required for column '%s', " +
@@ -337,8 +357,7 @@ object KijiTap {
     // Combine all error strings.
     if (!allErrors.isEmpty) {
       throw new InvalidKijiTapException("Errors found in validating Tap: %s".format(
-        allErrors.mkString(", \n")
-      ))
+        allErrors.mkString(", \n")))
     }
   }
 }

@@ -20,10 +20,9 @@
 package org.kiji.express.flow.framework
 
 import java.util.concurrent.atomic.AtomicLong
-
 import scala.collection.JavaConverters.asScalaIteratorConverter
-
 import cascading.flow.FlowProcess
+import cascading.scheme.NullScheme
 import cascading.scheme.Scheme
 import cascading.scheme.SinkCall
 import cascading.scheme.SourceCall
@@ -31,29 +30,33 @@ import cascading.tap.Tap
 import cascading.tuple.Fields
 import cascading.tuple.Tuple
 import cascading.tuple.TupleEntry
-
 import com.google.common.base.Objects
-
 import org.apache.avro.Schema
 import org.apache.commons.codec.binary.Base64
 import org.apache.commons.lang.SerializationUtils
 import org.apache.hadoop.conf.Configuration
+import org.apache.hadoop.hbase.HConstants
+import org.apache.hadoop.io.NullWritable
 import org.apache.hadoop.mapred.JobConf
 import org.apache.hadoop.mapred.OutputCollector
 import org.apache.hadoop.mapred.RecordReader
-
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
-
 import org.kiji.annotations.ApiAudience
 import org.kiji.annotations.ApiStability
+import org.kiji.annotations.Inheritance
 import org.kiji.express.EntityId
 import org.kiji.express.KijiSlice
 import org.kiji.express.PagedKijiSlice
-import org.kiji.express.flow._
+import org.kiji.express.flow.InvalidKijiTapException
+import org.kiji.express.flow.TimeRange
+import org.kiji.express.flow.WriterSchemaSpec
+import org.kiji.express.flow.framework.hfile.HFileKijiSinkContext
+import org.kiji.express.mapreduce.output.HFileCell
 import org.kiji.express.util.AvroUtil
 import org.kiji.express.util.Resources.doAndRelease
 import org.kiji.express.util.SpecificCellSpecs
+import org.kiji.mapreduce.framework.HFileKeyValue
 import org.kiji.mapreduce.framework.KijiConfKeys
 import org.kiji.schema.ColumnVersionIterator
 import org.kiji.schema.EntityIdFactory
@@ -72,7 +75,15 @@ import org.kiji.schema.avro.AvroValidationPolicy
 import org.kiji.schema.impl.Versions
 import org.kiji.schema.layout.KijiTableLayout
 import org.kiji.schema.util.ProtocolVersion
-
+import org.kiji.annotations.Inheritance
+import org.kiji.express.flow.ColumnRequestInput
+import org.kiji.express.flow.ColumnRequestOutput
+import org.kiji.express.flow.ColumnFamilyRequestInput
+import org.kiji.express.flow.QualifiedColumnRequestOutput
+import org.kiji.express.flow.ColumnFamilyRequestOutput
+import org.kiji.express.flow.QualifiedColumnRequestInput
+import org.kiji.express.flow.ColumnFamilyRequestOutput
+import org.kiji.express.flow.QualifiedColumnRequestOutput
 
 /**
  * A Kiji-specific implementation of a Cascading `Scheme`, which defines how to read and write the
@@ -100,10 +111,11 @@ import org.kiji.schema.util.ProtocolVersion
  */
 @ApiAudience.Framework
 @ApiStability.Experimental
+@Inheritance.Sealed
 class KijiScheme(
     private[express] val timeRange: TimeRange,
     private[express] val timestampField: Option[Symbol],
-    private[express] val loggingInterval: Long,
+    private[express] val loggingInterval: Long = 1000,
     private[express] val inputColumns: Map[String, ColumnRequestInput] = Map(),
     private[express] val outputColumns: Map[String, ColumnRequestOutput] = Map())
     extends Scheme[JobConf, RecordReader[KijiKey, KijiValue], OutputCollector[_, _],
@@ -128,17 +140,17 @@ class KijiScheme(
    * @param conf to which we will add our KijiDataRequest.
    */
   override def sourceConfInit(
-      flow: FlowProcess[JobConf],
-      tap: Tap[JobConf, RecordReader[KijiKey, KijiValue], OutputCollector[_, _]],
-      conf: JobConf) {
+    flow: FlowProcess[JobConf],
+    tap: Tap[JobConf, RecordReader[KijiKey, KijiValue], OutputCollector[HFileCell, NullWritable]],
+    conf: JobConf) {
     // Build a data request.
     val request: KijiDataRequest = buildRequest(timeRange, inputColumns.values)
 
     // Write all the required values to the job's configuration object.
     conf.setInputFormat(classOf[KijiInputFormat])
     conf.set(
-        KijiConfKeys.KIJI_INPUT_DATA_REQUEST,
-        Base64.encodeBase64String(SerializationUtils.serialize(request)))
+      KijiConfKeys.KIJI_INPUT_DATA_REQUEST,
+      Base64.encodeBase64String(SerializationUtils.serialize(request)))
     conf.set(SpecificCellSpecs.CELLSPEC_OVERRIDE_CONF_KEY,
         SpecificCellSpecs.serializeOverrides(inputColumns))
   }
@@ -151,15 +163,15 @@ class KijiScheme(
    * @param sourceCall containing the context for this source.
    */
   override def sourcePrepare(
-      flow: FlowProcess[JobConf],
-      sourceCall: SourceCall[KijiSourceContext, RecordReader[KijiKey, KijiValue]]) {
+    flow: FlowProcess[JobConf],
+    sourceCall: SourceCall[KijiSourceContext, RecordReader[KijiKey, KijiValue]]) {
     val tableUriProperty = flow.getStringProperty(KijiConfKeys.KIJI_INPUT_TABLE_URI)
     val uri: KijiURI = KijiURI.newBuilder(tableUriProperty).build()
 
     // Set the context used when reading data from the source.
     sourceCall.setContext(KijiSourceContext(
-        sourceCall.getInput.createValue(),
-        uri))
+      sourceCall.getInput.createValue(),
+      uri))
   }
 
   /**
@@ -172,8 +184,8 @@ class KijiScheme(
    *     `false` if there were no more rows to read.
    */
   override def source(
-      flow: FlowProcess[JobConf],
-      sourceCall: SourceCall[KijiSourceContext, RecordReader[KijiKey, KijiValue]]): Boolean = {
+    flow: FlowProcess[JobConf],
+    sourceCall: SourceCall[KijiSourceContext, RecordReader[KijiKey, KijiValue]]): Boolean = {
     // Get the current key/value pair.
     val KijiSourceContext(value, tableUri) = sourceCall.getContext
 
@@ -183,7 +195,7 @@ class KijiScheme(
 
     // scalastyle:off null
     while (sourceCall.getInput.next(null, value)) {
-    // scalastyle:on null
+      // scalastyle:on null
       val row: KijiRowData = value.get()
       val result: Option[Tuple] = rowToTuple(
           inputColumns,
@@ -207,7 +219,7 @@ class KijiScheme(
           flow.increment(counterGroupName, counterMissingField, 1)
           if (skippedRows.getAndIncrement() % loggingInterval == 0) {
             logger.warn("Row %s skipped because of missing field(s)."
-                .format(row.getEntityId.toShellString))
+              .format(row.getEntityId.toShellString))
           }
         }
       }
@@ -225,8 +237,8 @@ class KijiScheme(
    * @param sourceCall containing the context for this source.
    */
   override def sourceCleanup(
-      flow: FlowProcess[JobConf],
-      sourceCall: SourceCall[KijiSourceContext, RecordReader[KijiKey, KijiValue]]) {
+    flow: FlowProcess[JobConf],
+    sourceCall: SourceCall[KijiSourceContext, RecordReader[KijiKey, KijiValue]]) {
     // scalastyle:off null
     sourceCall.setContext(null)
     // scalastyle:on null
@@ -242,9 +254,9 @@ class KijiScheme(
    * @param conf to which we will add our KijiDataRequest.
    */
   override def sinkConfInit(
-      flow: FlowProcess[JobConf],
-      tap: Tap[JobConf, RecordReader[KijiKey, KijiValue], OutputCollector[_, _]],
-      conf: JobConf) {
+    flow: FlowProcess[JobConf],
+    tap: Tap[JobConf, RecordReader[KijiKey, KijiValue], OutputCollector[HFileCell, NullWritable]],
+    conf: JobConf) {
     // No-op since no configuration parameters need to be set to encode data for Kiji.
   }
 
@@ -256,18 +268,8 @@ class KijiScheme(
    * @param sinkCall containing the context for this source.
    */
   override def sinkPrepare(
-      flow: FlowProcess[JobConf],
-      sinkCall: SinkCall[KijiSinkContext, OutputCollector[_, _]]) {
-    // Open a table writer.
-    val uriString: String = flow.getConfigCopy.get(KijiConfKeys.KIJI_OUTPUT_TABLE_URI)
-    val uri: KijiURI = KijiURI.newBuilder(uriString).build()
-
-    val kiji: Kiji = Kiji.Factory.open(uri, flow.getConfigCopy)
-    doAndRelease(kiji.openTable(uri.getTable)) { table: KijiTable =>
-      // Set the sink context to an opened KijiTableWriter.
-      sinkCall.setContext(
-          KijiSinkContext(table.openTableWriter(), uri, kiji, table.getLayout))
-    }
+    flow: FlowProcess[JobConf],
+    sinkCall: SinkCall[KijiSinkContext, OutputCollector[HFileCell, NullWritable]]) {
   }
 
   /**
@@ -278,22 +280,15 @@ class KijiScheme(
    * @param sinkCall containing the context for this source.
    */
   override def sink(
-      flow: FlowProcess[JobConf],
-      sinkCall: SinkCall[KijiSinkContext, OutputCollector[_, _]]) {
-    // Retrieve writer from the scheme's context.
-    val KijiSinkContext(writer, tableUri, kiji, layout) = sinkCall.getContext
+    flow: FlowProcess[JobConf],
+    sinkCall: SinkCall[KijiSinkContext, OutputCollector[HFileCell, NullWritable]]) {
 
     // Write the tuple out.
     val output: TupleEntry = sinkCall.getOutgoingEntry
-    putTuple(
-        outputColumns,
-        tableUri,
-        kiji,
-        timestampField,
-        output,
-        writer,
-        layout,
-        flow.getConfigCopy)
+
+    outputCells(output, timestampField, outputColumns) {
+      sinkCall.getOutput().collect(_, NullWritable.get())
+    }
   }
 
   /**
@@ -304,13 +299,9 @@ class KijiScheme(
    * @param sinkCall containing the context for this source.
    */
   override def sinkCleanup(
-      flow: FlowProcess[JobConf],
-      sinkCall: SinkCall[KijiSinkContext, OutputCollector[_, _]]) {
-    sinkCall.getContext.kiji.release()
-    sinkCall.getContext.kijiTableWriter.close()
-    // scalastyle:off null
-    sinkCall.setContext(null)
-    // scalastyle:on null
+    flow: FlowProcess[JobConf],
+    sinkCall: SinkCall[KijiSinkContext, OutputCollector[HFileCell, NullWritable]]) {
+
   }
 
   override def equals(other: Any): Boolean = {
@@ -333,6 +324,7 @@ class KijiScheme(
       loggingInterval: java.lang.Long)
 }
 
+
 /**
  * Companion object for KijiScheme.
  *
@@ -342,6 +334,10 @@ class KijiScheme(
 @ApiAudience.Framework
 @ApiStability.Experimental
 object KijiScheme {
+  type HFileScheme = NullScheme[JobConf, RecordReader[_, _],
+    OutputCollector[HFileKeyValue, NullWritable], KijiSourceContext, HFileKijiSinkContext]
+
+  type HadoopScheme = Scheme[JobConf, RecordReader[_, _], OutputCollector[_, _], _, _]
   private val logger: Logger = LoggerFactory.getLogger(classOf[KijiScheme])
 
   /** Hadoop mapred counter group for KijiExpress. */
@@ -493,16 +489,16 @@ object KijiScheme {
 
     // Get the entityId.
     val entityId: EntityId =
-        output.getObject(entityIdField).asInstanceOf[EntityId]
+      output.getObject(entityIdField).asInstanceOf[EntityId]
 
     // Get a timestamp to write the values to, if it was specified by the user.
     val timestamp: Long = timestampField match {
       case Some(field) => output.getObject(field.name).asInstanceOf[Long]
-      case None => System.currentTimeMillis()
+      case None        => System.currentTimeMillis()
     }
 
     val layoutVersion = ProtocolVersion.parse(layout.getDesc.getVersion)
-    val validationEnabled =  { layoutVersion.compareTo(Versions.LAYOUT_1_3_0) >= 0 }
+    val validationEnabled = { layoutVersion.compareTo(Versions.LAYOUT_1_3_0) >= 0 }
     val schemaTable = kiji.getSchemaTable
 
     val eidFactory = EntityIdFactory.getFactory(layout)
@@ -516,9 +512,8 @@ object KijiScheme {
      * @return a schema to use for writing, if possible.
      */
     def getSchemaIfPossible(
-        columnName: KijiColumnName,
-        schemaSpecOption: Option[WriterSchemaSpec]
-    ): Option[Schema] = {
+      columnName: KijiColumnName,
+      schemaSpecOption: Option[WriterSchemaSpec]): Option[Schema] = {
       schemaSpecOption match {
         case Some(schemaSpec) => {
           if (schemaSpec.useDefaultReader) {
@@ -529,10 +524,9 @@ object KijiScheme {
         }
         case None => { // The only situation in which no schemaId specified is okay
           // is if avro validation policy is schema-1.0 compatibility mode.
-          if (
-              validationEnabled &&
-              layout.getCellSpec(columnName).getCellSchema.getAvroValidationPolicy
-                  !=  AvroValidationPolicy.SCHEMA_1_0) {
+          if (validationEnabled &&
+            layout.getCellSpec(columnName).getCellSchema.getAvroValidationPolicy
+            != AvroValidationPolicy.SCHEMA_1_0) {
             throw new InvalidKijiTapException(
               "Column '%s' must have a schema specified.".format(columnName))
           } else {
@@ -577,13 +571,13 @@ object KijiScheme {
    * @return the resolved Schema.
    */
   private[express] def resolveSchemaFromJSONOrUid(
-      readerSchema: AvroSchema,
-      schemaTable: KijiSchemaTable): Schema = {
+    readerSchema: AvroSchema,
+    schemaTable: KijiSchemaTable): Schema = {
     Option(readerSchema.getJson) match {
       case None => {
         schemaTable.getSchema(readerSchema.getUid)
       }
-      case Some (json) => {
+      case Some(json) => {
         val parser = new Schema.Parser
         parser.parse(json)
       }
@@ -608,18 +602,17 @@ object KijiScheme {
           .withFilter(column.filter.getOrElse(null))
           .withPageSize(column.pageSize.getOrElse(0))
           .add(column.getColumnName)
-        //case _ => builder.newColumnsDef().add(column.getColumnName())
       }
 
     val requestBuilder: KijiDataRequestBuilder = KijiDataRequest.builder()
-        .withTimeRange(timeRange.begin, timeRange.end)
+      .withTimeRange(timeRange.begin, timeRange.end)
 
     columns
-        .foldLeft(requestBuilder) { (builder, column) =>
-          addColumn(builder, column)
-          builder
-        }
-        .build()
+      .foldLeft(requestBuilder) { (builder, column) =>
+        addColumn(builder, column)
+        builder
+      }
+      .build()
   }
 
   /**
@@ -676,5 +669,35 @@ object KijiScheme {
     columns.valuesIterator.collect {
       case x: ColumnFamilyRequestOutput => x.qualifierSelector.toString
     }.toSeq
+  }
+
+  private[express] def outputCells(output: TupleEntry,
+                                   timestampField: Option[Symbol],
+                                   columns: Map[String, ColumnRequestOutput])(
+                                     cellHandler: HFileCell => Unit) {
+
+    // Get a timestamp to write the values to, if it was specified by the user.
+    val timestamp: Long = timestampField match {
+      case Some(field) => output.getObject(field.name).asInstanceOf[Long]
+      case None        => HConstants.LATEST_TIMESTAMP
+    }
+
+    // Get the entityId.
+    val entityId: EntityId =
+      output.getObject(entityIdField).asInstanceOf[EntityId]
+
+    columns.foreach(kv => {
+      val (fieldName, colRequest) = kv
+      val colValue = output.getObject(fieldName).asInstanceOf[AnyRef]
+      val newColRequest = colRequest match {
+        case cf @ ColumnFamilyRequestOutput(family, qualField, _, _) => {
+          val qualifier = output.getObject(qualField).asInstanceOf[String]
+          QualifiedColumnRequestOutput(family, qualifier)
+        }
+        case qc @ _ => qc
+      }
+      val cell = HFileCell(entityId, newColRequest, timestamp, colValue)
+      cellHandler(cell)
+    })
   }
 }
