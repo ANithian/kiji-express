@@ -31,7 +31,6 @@ import org.apache.hadoop.fs.FileSystem
 import cascading.flow.Flow
 import scala.transient
 import cascading.flow.Flow
-import org.kiji.express.flow.{HFileSource, KijiJob}
 import cascading.util.Util
 import java.util.Properties
 import scala.collection.JavaConverters.collectionAsScalaIterableConverter
