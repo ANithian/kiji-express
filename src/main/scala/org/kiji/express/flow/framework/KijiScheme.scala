@@ -84,6 +84,7 @@ import org.kiji.express.flow.ColumnFamilyRequestOutput
 import org.kiji.express.flow.QualifiedColumnRequestInput
 import org.kiji.express.flow.ColumnFamilyRequestOutput
 import org.kiji.express.flow.QualifiedColumnRequestOutput
+import org.kiji.express.flow.QualifiedColumnRequestOutput
 
 /**
  * A Kiji-specific implementation of a Cascading `Scheme`, which defines how to read and write the
@@ -118,8 +119,8 @@ class KijiScheme(
     private[express] val loggingInterval: Long = 1000,
     private[express] val inputColumns: Map[String, ColumnRequestInput] = Map(),
     private[express] val outputColumns: Map[String, ColumnRequestOutput] = Map())
-    extends Scheme[JobConf, RecordReader[KijiKey, KijiValue], OutputCollector[_, _],
-        KijiSourceContext, KijiSinkContext] {
+    extends Scheme[JobConf, RecordReader[KijiKey, KijiValue],
+      OutputCollector[HFileCell, NullWritable], KijiSourceContext, KijiSinkContext] {
   import KijiScheme._
 
   /** Keeps track of how many rows have been skipped, for logging purposes. */
@@ -690,11 +691,11 @@ object KijiScheme {
       val (fieldName, colRequest) = kv
       val colValue = output.getObject(fieldName).asInstanceOf[AnyRef]
       val newColRequest = colRequest match {
-        case cf @ ColumnFamilyRequestOutput(family, qualField, _, _) => {
+        case cf @ ColumnFamilyRequestOutput(family, qualField, schemaId, useDefaultReader) => {
           val qualifier = output.getObject(qualField).asInstanceOf[String]
-          QualifiedColumnRequestOutput(family, qualifier)
+          QualifiedColumnRequestOutput(family, qualifier, schemaId, useDefaultReader)
         }
-        case qc @ _ => qc
+        case qc @ QualifiedColumnRequestOutput(_,_,_,_) => qc
       }
       val cell = HFileCell(entityId, newColRequest, timestamp, colValue)
       cellHandler(cell)

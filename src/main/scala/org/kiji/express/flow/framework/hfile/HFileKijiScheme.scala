@@ -20,7 +20,6 @@
 package org.kiji.express.flow.framework.hfile
 
 import java.util.concurrent.atomic.AtomicLong
-
 import cascading.flow.FlowProcess
 import cascading.scheme.Scheme
 import cascading.scheme.SinkCall
@@ -33,12 +32,10 @@ import org.apache.hadoop.io.NullWritable
 import org.apache.hadoop.mapred.JobConf
 import org.apache.hadoop.mapred.OutputCollector
 import org.apache.hadoop.mapred.RecordReader
-
 import org.kiji.annotations.ApiAudience
 import org.kiji.annotations.ApiAudience.Framework
 import org.kiji.annotations.ApiStability
 import org.kiji.annotations.ApiStability.Experimental
-import org.kiji.express.flow.ColumnRequest
 import org.kiji.express.flow.TimeRange
 import org.kiji.express.flow.framework.KijiScheme
 import org.kiji.express.flow.framework.KijiSourceContext
@@ -56,6 +53,7 @@ import org.kiji.schema.KijiURI
 import org.kiji.schema.impl.DefaultKijiCellEncoderFactory
 import org.kiji.schema.layout.KijiTableLayout
 import org.kiji.schema.layout.impl.ColumnNameTranslator
+import org.kiji.express.flow.ColumnRequestOutput
 
  /**
  * A Kiji-specific implementation of a Cascading `Scheme` which defines how to write data
@@ -86,7 +84,7 @@ private[express] class HFileKijiScheme(
   private[express] val timeRange: TimeRange,
   private[express] val timestampField: Option[Symbol],
   private[express] val loggingInterval: Long,
-  private[express] val columns: Map[String, ColumnRequest])
+  private[express] val columns: Map[String, ColumnRequestOutput])
     extends KijiScheme.HFileScheme {
 
   import KijiScheme._

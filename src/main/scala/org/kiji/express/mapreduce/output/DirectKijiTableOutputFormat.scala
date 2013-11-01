@@ -26,11 +26,9 @@ import org.apache.hadoop.mapreduce.RecordWriter
 import org.apache.hadoop.mapreduce.TaskAttemptContext
 import org.apache.hadoop.mapreduce.lib.output.FileOutputFormat
 import org.apache.hadoop.mapreduce.lib.output.NullOutputFormat
-
 import org.kiji.express.Cell
 import org.kiji.express.EntityId
 import org.kiji.express.flow.InvalidKijiTapException
-import org.kiji.express.flow.QualifiedColumn
 import org.kiji.express.flow.WriterSchemaSpec
 import org.kiji.express.util.AvroUtil
 import org.kiji.express.util.Resources
@@ -48,6 +46,8 @@ import org.kiji.schema.avro.AvroValidationPolicy
 import org.kiji.schema.impl.Versions
 import org.kiji.schema.layout.KijiTableLayout
 import org.kiji.schema.util.ProtocolVersion
+import org.kiji.express.flow.QualifiedColumnRequestOutput
+import org.kiji.express.flow.QualifiedColumnRequestOutput
 
 /**
  * A cell from a Kiji table containing some datum, addressed by a family, qualifier,
@@ -61,7 +61,7 @@ import org.kiji.schema.util.ProtocolVersion
  */
 case class HFileCell private[express] (
   entity_id: EntityId,
-  col_request: QualifiedColumn,
+  col_request: QualifiedColumnRequestOutput,
   timestamp: Long,
   datum: AnyRef)
 
@@ -97,8 +97,8 @@ class DirectKijiTableOutputFormat extends NullOutputFormat[HFileCell, NullWritab
     override def write(key: HFileCell, value: NullWritable) {
       val jEntityId = key.entity_id.toJavaEntityId(eidFactory)
       val qc = key.col_request
-      val schemaSpec = qc.options.writerSchemaSpec
-      val schema: Option[Schema] = getSchemaIfPossible(qc.getColumnName(), schemaSpec)
+      val schema: Option[Schema] = getSchemaIfPossible(qc)
+
       kijiWriter.put(
         jEntityId,
         qc.family,
@@ -111,33 +111,25 @@ class DirectKijiTableOutputFormat extends NullOutputFormat[HFileCell, NullWritab
      * Gets the schema from the schemaIdOption if it exists, otherwise tries to resolve the default
      * reader schema for the table.  Returns None if neither of those are possible.
      *
-     * @param columnName of the column to try to get the schema for.
+     * @param getColumnName() of the column to try to get the schema for.
      * @param schemaSpecOption of the schema to try to resolve.
      * @return a schema to use for writing, if possible.
      */
-    def getSchemaIfPossible(
-      columnName: KijiColumnName,
-      schemaSpecOption: Option[WriterSchemaSpec]): Option[Schema] = {
-      schemaSpecOption match {
-        case Some(schemaSpec) => {
-          if (schemaSpec.useDefaultReader) {
-            return Some(layout.getCellSpec(columnName).getDefaultReaderSchema)
-          } else {
-            return Some(schemaTable.getSchema(schemaSpec.schemaId.get))
-          }
-        }
-        case None => { // The only situation in which no schemaId specified is okay
-          // is if avro validation policy is schema-1.0 compatibility mode.
-          if (validationEnabled &&
-            layout.getCellSpec(columnName).getCellSchema.getAvroValidationPolicy
-            != AvroValidationPolicy.SCHEMA_1_0) {
-            throw new InvalidKijiTapException(
-              "Column '%s' must have a schema specified.".format(columnName))
-          } else {
-            return None
-          }
-        }
-      }
+    def getSchemaIfPossible(qualColumn: QualifiedColumnRequestOutput): Option[Schema] = {
+      val colName = qualColumn.getColumnName
+
+      if (qualColumn.useDefaultReaderSchema) {
+        Some(layout.getCellSpec(colName).getDefaultReaderSchema)
+      } else if (qualColumn.schemaId.isDefined) {
+        Some(schemaTable.getSchema(qualColumn.schemaId.get))
+      } else if (validationEnabled &&
+        layout.getCellSpec(colName).getCellSchema.getAvroValidationPolicy
+        != AvroValidationPolicy.SCHEMA_1_0) {
+        // is if avro validation policy is schema-1.0 compatibility mode.
+        throw new InvalidKijiTapException(
+          "Column '%s' must have a schema specified.".format(colName))
+      } else
+        None
     }
   }
 

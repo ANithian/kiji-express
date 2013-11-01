@@ -17,15 +17,13 @@
  * limitations under the License.
  */
 
-package org.kiji.express.flow
+package org.kiji.express.flow.framework.hfile
 
 import java.io.OutputStream
 import java.lang.UnsupportedOperationException
 import java.util.Properties
-
 import scala.collection.JavaConverters.asScalaIteratorConverter
 import scala.collection.mutable.Buffer
-
 import cascading.flow.FlowProcess
 import cascading.flow.hadoop.util.HadoopUtil
 import cascading.scheme.Scheme
@@ -53,7 +51,6 @@ import org.apache.hadoop.io.Writable
 import org.apache.hadoop.mapred.JobConf
 import org.apache.hadoop.mapred.OutputCollector
 import org.apache.hadoop.mapred.RecordReader
-
 import org.kiji.annotations.ApiAudience
 import org.kiji.annotations.ApiStability
 import org.kiji.express.Cell
@@ -84,9 +81,9 @@ import org.kiji.mapreduce.framework.HFileKeyValue
 import org.apache.hadoop.io.NullWritable
 import cascading.scheme.hadoop.WritableSequenceFile
 import org.apache.hadoop.io.Writable
-import org.kiji.express.flow.framework.hfile.SemiNullScheme
-import org.kiji.express.flow.framework.hfile.HFileKijiScheme
-import org.kiji.express.flow.framework.hfile.HFileKijiTap
+import org.kiji.express.flow.ColumnRequestOutput
+import org.kiji.express.flow.All
+import org.kiji.express.flow.TimeRange
 
 /**
  * A read or write view of a Kiji table.
@@ -127,7 +124,7 @@ class HFileKijiSource private[express] (
   val timeRange: TimeRange,
   val timestampField: Option[Symbol],
   val loggingInterval: Long,
-  val columns: Map[Symbol, ColumnRequest])
+  val columns: Map[Symbol, ColumnRequestOutput])
     extends Source {
 
   import org.kiji.express.flow.KijiSource._
@@ -137,7 +134,7 @@ class HFileKijiSource private[express] (
    * the hadoop runner.
    */
   override val hdfsScheme: KijiScheme.HadoopScheme =
-    new HFileKijiScheme(timeRange, timestampField, loggingInterval, convertColumnMap(columns))
+    new HFileKijiScheme(timeRange, timestampField, loggingInterval, convertKeysToStrings(columns))
       // This cast is required due to Scheme being defined with invariant type parameters.
       .asInstanceOf[KijiScheme.HadoopScheme]
 

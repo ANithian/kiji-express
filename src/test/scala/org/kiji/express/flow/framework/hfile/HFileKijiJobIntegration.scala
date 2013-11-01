@@ -21,9 +21,7 @@ package org.kiji.express.flow.framework.hfile
 
 import java.io.File
 import java.util.Random
-
 import scala.collection.JavaConverters._
-
 import cascading.pipe.Pipe
 import com.twitter.scalding.Args
 import com.twitter.scalding.TextLine
@@ -37,7 +35,6 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.scalatest.FunSuite
 import org.scalatest.junit.JUnitRunner
-
 import org.kiji.express.EntityId
 import org.kiji.express.util.Resources
 import org.kiji.mapreduce.HFileLoader
@@ -48,6 +45,7 @@ import org.kiji.schema.KijiDataRequestBuilder
 import org.kiji.schema.KijiTable
 import org.kiji.schema.layout.KijiTableLayouts
 import org.kiji.schema.testutil.AbstractKijiIntegrationTest
+import org.junit.After
 
 class HFileKijiJobIntegration extends AbstractKijiIntegrationTest {
 
@@ -58,6 +56,11 @@ class HFileKijiJobIntegration extends AbstractKijiIntegrationTest {
     val desc = KijiTableLayouts.getLayout("layout/avro-types.json");
     mKiji = Kiji.Factory.open(getKijiURI())
     mKiji.createTable(desc)
+  }
+
+  @After
+  def cleanupTest {
+    mKiji.release()
   }
 
   @Test

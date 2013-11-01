@@ -23,9 +23,8 @@ import org.kiji.annotations.ApiAudience
 import org.kiji.annotations.ApiStability
 import org.kiji.annotations.Inheritance
 import org.kiji.express.flow.All
-import org.kiji.express.flow.Column
-import org.kiji.express.flow.ColumnRequest
 import org.kiji.express.flow.KijiOutput
+import org.kiji.express.flow.ColumnRequestOutput
 
 /**
  * Factory methods for constructing [[org.kiji.express.flow.framework.hfile.HFileKijiSource]]s that
@@ -83,7 +82,7 @@ object HFileKijiOutput {
   def apply(
       tableUri: String,
       hFileOutput: String,
-      columns: Map[Symbol, _ <: ColumnRequest]
+      columns: Map[Symbol, _ <: ColumnRequestOutput]
   ): HFileKijiSource = {
     new HFileKijiSource(
         tableAddress = tableUri,
@@ -113,7 +112,7 @@ object HFileKijiOutput {
 
     val columnMap = columns
         .toMap
-        .mapValues(Column(_).ignoreMissing)
+        .mapValues(ColumnRequestOutput(_))
     new HFileKijiSource(
         tableAddress = tableUri,
         hFileOutput = hFileOutput,
@@ -138,7 +137,7 @@ object HFileKijiOutput {
       tableUri: String,
       hFileOutput: String,
       timestampField: Symbol,
-      columns: Map[Symbol, _ <: ColumnRequest]
+      columns: Map[Symbol, _ <: ColumnRequestOutput]
   ): HFileKijiSource = {
     require(timestampField != null)
 
@@ -168,7 +167,7 @@ object HFileKijiOutput {
   ): HFileKijiSource = {
     val columnMap = columns
         .toMap
-        .mapValues(Column(_).ignoreMissing)
+        .mapValues(ColumnRequestOutput(_))
 
     HFileKijiOutput(tableUri, hFileOutput, columnMap)
   }
